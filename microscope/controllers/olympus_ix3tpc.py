@@ -35,6 +35,7 @@ import typing
 import enum
 import dataclasses
 import microscope
+import microscope._utils
 import microscope.abc
 import time
 
@@ -207,9 +208,7 @@ def _callback_command(
     # operator is used to ensure the key is an integer
     key = cmd_data.m_Callback or 0
     # Derive the response
-    response = "".join(
-        [chr(x) for x in cmd_data.m_Rsp[0 : cmd_data.m_RspSize]]
-    )
+    response = "".join([chr(x) for x in cmd_data.m_Rsp[0 : cmd_data.m_RspSize]])
     # Derive the command table
     command_table = ctypes.cast(cmd_data.m_Context, ctypes.py_object).value
     # Set the status (on timeout the pContext pointer is NULL)
@@ -287,7 +286,7 @@ class IX3TPC(microscope.abc.Controller):
     def devices(self) -> typing.Dict[str, microscope.abc.Device]:
         return self._devices
 
-    def _on_shutdown(self) -> None:
+    def _do_shutdown(self) -> None:
         # Command callbacks stop working in __del__ and this is valid for
         # both the Controller and its devices; probably something to do with
         # threading and scheduling. The first command from all __del__'s
@@ -301,7 +300,7 @@ class IX3TPC(microscope.abc.Controller):
         # and hope for the best. Even better not to send any command from
         # _on_disable and _on_shutdown in subdevices.
         self._shutting_down = True
-        super()._on_shutdown()
+        super()._do_shutdown()
         # Logout. Timeout value could be as low as possible, the command is
         # going to timeout anyway.
         self.send_command("L 0,0", timeout_ms=0)
@@ -330,9 +329,7 @@ class IX3TPC(microscope.abc.Controller):
             )
         # Get the address of the library's Interface object with index 0
         self._pm_if_data_addr = ctypes.c_void_p(0)
-        _ = _dll.MSL_PM_GetInterfaceInfo(
-            0, ctypes.byref(self._pm_if_data_addr)
-        )
+        _ = _dll.MSL_PM_GetInterfaceInfo(0, ctypes.byref(self._pm_if_data_addr))
         # Open the interface
         success = _dll.MSL_PM_OpenInterface(self._pm_if_data_addr)
         if not success:
@@ -483,12 +480,15 @@ class IX3TPC(microscope.abc.Controller):
                 )
 
 
-class _IX3LHLEDC(microscope.abc.LightSource):
+class _IX3LHLEDC(
+    microscope._utils.OnlyTriggersBulbOnSoftwareMixin,
+    microscope.abc.LightSource,
+):
     def __init__(self, tpc: IX3TPC) -> None:
         super().__init__()
         self._tpc = tpc
 
-    def _on_enable(self) -> None:
+    def _do_enable(self) -> None:
         status, response = self._tpc.send_command_blocking("DSH 0")
         if status != CommandStatus.SUCCESS or response != "DSH +":
             raise ValueError(
@@ -496,7 +496,7 @@ class _IX3LHLEDC(microscope.abc.LightSource):
                 "Status: {:s}. Response: {:s}".format(status.name, response)
             )
 
-    def _on_disable(self) -> None:
+    def _do_disable(self) -> None:
         # Controller devices are garbage collected after the Controller
         # itself, so ensure that commands are sent only if the connection
         # is still open
@@ -505,12 +505,10 @@ class _IX3LHLEDC(microscope.abc.LightSource):
             if status != CommandStatus.SUCCESS or response != "DSH +":
                 raise ValueError(
                     "Unexpected response for command 'DSH 1'. "
-                    "Status: {:s}. Response: {:s}".format(
-                        status.name, response
-                    )
+                    "Status: {:s}. Response: {:s}".format(status.name, response)
                 )
 
-    def _on_shutdown(self):
+    def _do_shutdown(self):
         pass
 
     def initialize(self):
@@ -582,11 +580,8 @@ class _IX3SSU(microscope.abc.Stage):
     def initialize(self) -> None:
         super().initialize()
 
-    def _on_shutdown(self) -> None:
-        super()._on_shutdown()
-
-    def _on_enable(self) -> bool:
-        return False
+    def _do_shutdown(self) -> None:
+        super()._do_shutdown()
 
     @property
     def axes(self) -> typing.Mapping[str, microscope.abc.StageAxis]:
