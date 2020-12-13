@@ -275,12 +275,13 @@ class IX3TPC(microscope.abc.Controller):
         self._command_table: typing.Dict[int, _CommandTableEntry] = {}
         # Initialise the PortManager library and establish connection with TPC
         self._initialise_portmanager()
-        self._shutting_down = False
         # Login to the TPC and configure it
         self._login()
         self._configure()
         # Add devices
+        # TODO: specify the devices in the config
         self._devices["LHLEDC"] = _IX3LHLEDC(self)
+        self._devices["IX3SSU"] = _IX3SSU(self)
 
     @property
     def devices(self) -> typing.Dict[str, microscope.abc.Device]:
@@ -298,9 +299,10 @@ class IX3TPC(microscope.abc.Controller):
         # timeouts). Therefore, the only solution seems to be to blindly
         # add delays, large enough to ensure the commands are completed,
         # and hope for the best. Even better not to send any command from
-        # _on_disable and _on_shutdown in subdevices.
-        self._shutting_down = True
-        super()._do_shutdown()
+        # _on_disable and _on_shutdown in subdevices. The best: do not call
+        # _do_shutdown from the superclass, so devices will not be disabled or
+        # shut down.
+        #
         # Logout. Timeout value could be as low as possible, the command is
         # going to timeout anyway.
         self.send_command("L 0,0", timeout_ms=0)
@@ -488,6 +490,11 @@ class _IX3LHLEDC(
         super().__init__()
         self._tpc = tpc
 
+    def __del__(self) -> None:
+        # Prevent shutdown during garbage collection. The shutting
+        # down is left to the controller device (TPC).
+        pass
+
     def _do_enable(self) -> None:
         status, response = self._tpc.send_command_blocking("DSH 0")
         if status != CommandStatus.SUCCESS or response != "DSH +":
@@ -497,16 +504,12 @@ class _IX3LHLEDC(
             )
 
     def _do_disable(self) -> None:
-        # Controller devices are garbage collected after the Controller
-        # itself, so ensure that commands are sent only if the connection
-        # is still open
-        if not self._tpc._shutting_down:
-            status, response = self._tpc.send_command_blocking("DSH 1")
-            if status != CommandStatus.SUCCESS or response != "DSH +":
-                raise ValueError(
-                    "Unexpected response for command 'DSH 1'. "
-                    "Status: {:s}. Response: {:s}".format(status.name, response)
-                )
+        status, response = self._tpc.send_command_blocking("DSH 1")
+        if status != CommandStatus.SUCCESS or response != "DSH +":
+            raise ValueError(
+                "Unexpected response for command 'DSH 1'. "
+                "Status: {:s}. Response: {:s}".format(status.name, response)
+            )
 
     def _do_shutdown(self):
         pass
@@ -530,11 +533,11 @@ class _IX3LHLEDC(
         return bool(int(response.split()[-1]))
 
     def _do_get_power(self) -> float:
-        status, response = self._tpc.send_command_blocking("DSH?")
+        status, response = self._tpc.send_command_blocking("DIL1?")
         power_int = int(response.split()[-1]) if response else -1
         if status != CommandStatus.SUCCESS or not 0 <= power_int <= 255:
             raise ValueError(
-                "Unexpected response for command 'DSH?'. "
+                "Unexpected response for command 'DIL1?'. "
                 "Status: {:s}. Response: {:s}".format(status.name, response)
             )
         return power_int / 255
@@ -551,44 +554,100 @@ class _IX3LHLEDC(
             )
 
 
-class _IX3SSUAxis(microscope.abc.StageAxis):
-    def __init__(self, tpc: IX3TPC) -> None:
-        super().__init__()
-        self._tpc = tpc
-
-    def move_by(self, delta: float) -> None:
-        pass
-
-    def move_to(self, pos: float) -> None:
-        pass
-
-    @property
-    def position(self) -> float:
-        return 0
-
-    @property
-    def limits(self) -> microscope.AxisLimits:
-        return microscope.AxisLimits(lower=0, upper=0)
-
-
 class _IX3SSU(microscope.abc.Stage):
+    """Because the axes are coupled, the position of the stage needs to be maintained internally."""
+
     def __init__(self, tpc: IX3TPC) -> None:
         super().__init__()
         self._tpc = tpc
-        self._axes = {}
+        self._axes = {"x": _IX3SSUAxis(self, "x"), "y": _IX3SSUAxis(self, "y")}
 
     def initialize(self) -> None:
-        super().initialize()
+        pass
 
     def _do_shutdown(self) -> None:
-        super()._do_shutdown()
+        pass
 
     @property
     def axes(self) -> typing.Mapping[str, microscope.abc.StageAxis]:
         return self._axes
 
+    @property
+    def position(self) -> typing.Mapping[str, float]:
+        status, response = self._tpc.send_command_blocking("XYP?")
+        if status != CommandStatus.SUCCESS or not response:
+            raise ValueError(
+                "Unexpected response for command 'XYP?'. "
+                "Status: {:s}. Response: {:s}".format(status.name, response)
+            )
+        x, y = map(float, response.split()[-1].split(","))
+        return {"x": x, "y": y}
+
     def move_by(self, delta: typing.Mapping[str, float]) -> None:
-        pass
+        command = "XYM {:d},{:d}".format(int(delta["x"]), int(delta["y"]))
+        status, response = self._tpc.send_command_blocking(command)
+        if status != CommandStatus.SUCCESS or not response:
+            raise ValueError(
+                "Unexpected response for command '{:s}'. "
+                "Status: {:s}. Response: {:s}".format(
+                    command, status.name, response
+                )
+            )
+        elif response == "XYM !,E0B700020":
+            _logger.warning("Attempted to move the stage beyond its limits.")
+        elif response == "XYM !,E0B700070":
+            _logger.warning("Attempted to move the stage while in motion.")
 
     def move_to(self, position: typing.Mapping[str, float]) -> None:
-        pass
+        command = "XYG {:d},{:d}".format(int(position["x"]), int(position["y"]))
+        status, response = self._tpc.send_command_blocking(command)
+        if status != CommandStatus.SUCCESS or not response:
+            raise ValueError(
+                "Unexpected response for command '{:s}'. "
+                "Status: {:s}. Response: {:s}".format(
+                    command, status.name, response
+                )
+            )
+        elif response == "XYM !,E0B700020":
+            _logger.warning("Attempted to move the stage beyond its limits.")
+        elif response == "XYM !,E0B700070":
+            _logger.warning("Attempted to move the stage while in motion.")
+
+
+class _IX3SSUAxis(microscope.abc.StageAxis):
+    """Axis"""
+
+    _LIMIT_GET_COMMANDS = {"x": "XRANGE?", "y": "YRANGE?"}
+
+    def __init__(self, stage: _IX3SSU, name: str) -> None:
+        super().__init__()
+        self._stage = stage
+        self._name = name
+
+    def move_by(self, delta: float) -> None:
+        deltas = {"x": 0, "y": 0}
+        deltas[self._name] = int(delta)
+        self._stage.move_by(deltas)
+
+    def move_to(self, pos: float) -> None:
+        pos_xy = self._stage.position
+        pos_xy[self._name] = int(pos)
+        self._stage.move_to(pos_xy)
+
+    @property
+    def position(self) -> float:
+        return self._stage.position[self._name]
+
+    @property
+    def limits(self) -> microscope.AxisLimits:
+        command = self._LIMIT_GET_COMMANDS[self._name]
+        status, response = self._stage._tpc.send_command_blocking(command)
+        if status != CommandStatus.SUCCESS or not response:
+            raise ValueError(
+                "Unexpected response for command '{:s}'. "
+                "Status: {:s}. Response: {:s}".format(
+                    command, status.name, response
+                )
+            )
+        lmin, lmax = response.split()[-1].split(",")
+        return microscope.AxisLimits(lower=int(lmin), upper=int(lmax))
