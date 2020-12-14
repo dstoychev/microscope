@@ -477,26 +477,54 @@ class IX3TPC(microscope.abc.Controller):
         return status, response
 
     def _login(self) -> None:
-        # TODO: Login sequence can fail if one of the units has an undefined
-        # state, e.g. the nosepiece position is in-between objectives. All
-        # relevant primary commands should be used to query and verify the
-        # state of the microscope, i.e. "OB1?", "MU1?", "MU2?", "ESH1?", etc.
         command_sequence = (
             # Attempt to login; will succeed for window statuses 1 and 2
-            ("L 1,0", "L +"),
+            (
+                "L 1,0",
+                ["L +"],
+                "The touchscreen panel controller is likely not in the right "
+                "state. Ensure it's powered on and it shows a large button "
+                "with label 'Start Operation'.",
+            ),
+            # Check the position of the nosepiece
+            (
+                "OB?",
+                ["OB {:d}".format(i + 1) for i in range(6)],
+                "The nosepiece is in-between positions. Please rotate the "
+                "nosepiece and ensure it snaps into one of the positions.",
+            ),
             # Enable focus (nosepiece) and XY (stage) control
-            ("EN6 1,1", "EN6 +"),
+            (
+                "EN6 1,1",
+                ["EN6 +"],
+                "There was a problem enabling the focus and XY dials. Please "
+                "check the condition of the nosepiece, the stage, and the "
+                "corresponding controllers.",
+            ),
             # Enable the touch panel => Expect pACK
-            ("EN5 1", "EN5 +"),
+            (
+                "EN5 1",
+                ["EN5 +"],
+                "There was a problem enabling the touchscreen panel "
+                "controller.",
+            ),
             # Switch to remote IDLE state
-            ("OPE 0", "OPE +"),
+            (
+                "OPE 0",
+                ["OPE +"],
+                "There was a problem disabling the settings mode. Please "
+                "ensure that there are no dialogues open on the touchscreen "
+                "panel controller.",
+            ),
         )
-        for (cmd_msg, cmd_exprsp) in command_sequence:
+        for (cmd_msg, cmd_exprsp, cmd_errmsg) in command_sequence:
             status, response = self.send_command_blocking(cmd_msg)
-            if status != CommandStatus.SUCCESS or response != cmd_exprsp:
+            if status != CommandStatus.SUCCESS or response not in cmd_exprsp:
                 raise microscope.InitialiseError(
-                    "Error logging in. Command: '{:s}'. Status: '{:s}'. "
-                    "Response: '{:s}'.".format(cmd_msg, status.name, response)
+                    "Error logging in. {:s} Command: '{:s}'. Status: '{:s}'. "
+                    "Response: '{:s}'.".format(
+                        cmd_errmsg, cmd_msg, status.name, response
+                    )
                 )
 
     def _configure(self) -> None:
