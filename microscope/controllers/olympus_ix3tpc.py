@@ -24,7 +24,21 @@ The IX3 Touch Panel Controller (TPC) comes with the IX83 microscope
 frames and it controls all motorised components via the IX3-CBH 
 control unit. This software implementation is a wrapper around the
 PortManager software library, which is proprietary and can be
-requested from Olympus.
+requested from Olympus. Because the PortManager library works only on Windows,
+so does this module too.
+
+The library files should be placed in a directory called "gtlib" in the place
+as your python.exe. For example, with Python 3.9 this will likely be:
+
+    C:\\Program Files\\Python39\\gtlib
+
+The library consists of the following files:
+
+    fsi1394.dll
+    gt_log.dll
+    gtlib.config
+    msl_pd_1394.dll
+    msl_pm.dll
 
 """
 import logging
@@ -264,11 +278,17 @@ def _callback_error(
 
 
 class IX3TPC(microscope.abc.Controller):
-    """IX3 Touch Panel Controller"""
+    """IX3 Touch Panel Controller.
+
+    Args:
+        units: A `set` of units controllable by the TPC interface. For IX83
+            microscopes, the :class:`IX83Units` can be used.
+
+    """
 
     _COMMAND_TERMINATOR = "\r\n"
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, units: "IX83Units", **kwargs) -> None:
         super().__init__(**kwargs)
         self._devices: typing.Dict[str, microscope.abc.Device] = {}
         self._pm_if_data_addr = ctypes.c_void_p(0)
@@ -279,9 +299,10 @@ class IX3TPC(microscope.abc.Controller):
         self._login()
         self._configure()
         # Add devices
-        # TODO: specify the devices in the config
-        self._devices["LHLEDC"] = _IX3LHLEDC(self)
-        self._devices["IX3SSU"] = _IX3SSU(self)
+        for unit in units:
+            class_type = unit.value
+            mapping_name = class_type.__name__[1:]  # omit leading underscore
+            self._devices[mapping_name] = class_type(self)
 
     @property
     def devices(self) -> typing.Dict[str, microscope.abc.Device]:
@@ -365,11 +386,22 @@ class IX3TPC(microscope.abc.Controller):
         callback_args: typing.Tuple[typing.Any, ...] = (),
         timeout_ms: int = 10000,
     ) -> None:
-        """Send an asynchronouse command.
+        """Send an asynchronous command.
 
-        Only the body of the command should be specified, without the header
-        or the terminator. The underlying data associated with the command or
-        the callback kwargs is deleted after the callback terminates.
+        Args:
+            cmd: The body of the command only, without the header or the
+                terminator.
+            callback: A callable object which will be executed once the command
+                has been processed by the PortManager library.
+            callback_args: A tuple of arguments which will be passed to the
+                callback.
+            timeout_ms: A time interval, in miliseconds, after which the command
+                will be timed-out if no response has been received.
+
+        The underlying data associated with the command, containing references
+        to the callback and its arguments among other things, is deleted after
+        the callback terminates. Do not use anonymous objects if you want to use
+        them beyond that point.
 
         .. note::
             Callbacks can raise their own errors, but this will print an
@@ -486,6 +518,8 @@ class _IX3LHLEDC(
     microscope._utils.OnlyTriggersBulbOnSoftwareMixin,
     microscope.abc.LightSource,
 ):
+    """IX3-LHLEDC white LED light source."""
+
     def __init__(self, tpc: IX3TPC) -> None:
         super().__init__()
         self._tpc = tpc
@@ -498,7 +532,7 @@ class _IX3LHLEDC(
     def _do_enable(self) -> None:
         status, response = self._tpc.send_command_blocking("DSH 0")
         if status != CommandStatus.SUCCESS or response != "DSH +":
-            raise ValueError(
+            _logger.error(
                 "Unexpected response for command 'DSH 0'. "
                 "Status: {:s}. Response: {:s}".format(status.name, response)
             )
@@ -506,7 +540,7 @@ class _IX3LHLEDC(
     def _do_disable(self) -> None:
         status, response = self._tpc.send_command_blocking("DSH 1")
         if status != CommandStatus.SUCCESS or response != "DSH +":
-            raise ValueError(
+            _logger.error(
                 "Unexpected response for command 'DSH 1'. "
                 "Status: {:s}. Response: {:s}".format(status.name, response)
             )
@@ -526,7 +560,7 @@ class _IX3LHLEDC(
             "DSH 0",
             "DSH 1",
         ):
-            raise ValueError(
+            _logger.error(
                 "Unexpected response for command 'DSH?'. "
                 "Status: {:s}. Response: {:s}".format(status.name, response)
             )
@@ -536,7 +570,7 @@ class _IX3LHLEDC(
         status, response = self._tpc.send_command_blocking("DIL1?")
         power_int = int(response.split()[-1]) if response else -1
         if status != CommandStatus.SUCCESS or not 0 <= power_int <= 255:
-            raise ValueError(
+            _logger.error(
                 "Unexpected response for command 'DIL1?'. "
                 "Status: {:s}. Response: {:s}".format(status.name, response)
             )
@@ -546,7 +580,7 @@ class _IX3LHLEDC(
         command = "DIL1 {:d}".format(int(power * 255))
         status, response = self._tpc.send_command_blocking(command)
         if status != CommandStatus.SUCCESS or response != "DIL1 +":
-            raise ValueError(
+            _logger.error(
                 "Unexpected response for command '{:s}'. "
                 "Status: {:s}. Response: {:s}".format(
                     command, status.name, response
@@ -555,7 +589,7 @@ class _IX3LHLEDC(
 
 
 class _IX3SSU(microscope.abc.Stage):
-    """Because the axes are coupled, the position of the stage needs to be maintained internally."""
+    """IX3-SSU ultrasonic stage for IX3."""
 
     def __init__(self, tpc: IX3TPC) -> None:
         super().__init__()
@@ -587,7 +621,7 @@ class _IX3SSU(microscope.abc.Stage):
         command = "XYM {:d},{:d}".format(int(delta["x"]), int(delta["y"]))
         status, response = self._tpc.send_command_blocking(command)
         if status != CommandStatus.SUCCESS or not response:
-            raise ValueError(
+            _logger.error(
                 "Unexpected response for command '{:s}'. "
                 "Status: {:s}. Response: {:s}".format(
                     command, status.name, response
@@ -602,7 +636,7 @@ class _IX3SSU(microscope.abc.Stage):
         command = "XYG {:d},{:d}".format(int(position["x"]), int(position["y"]))
         status, response = self._tpc.send_command_blocking(command)
         if status != CommandStatus.SUCCESS or not response:
-            raise ValueError(
+            _logger.error(
                 "Unexpected response for command '{:s}'. "
                 "Status: {:s}. Response: {:s}".format(
                     command, status.name, response
@@ -615,7 +649,7 @@ class _IX3SSU(microscope.abc.Stage):
 
 
 class _IX3SSUAxis(microscope.abc.StageAxis):
-    """Axis"""
+    """Axis of the IX3-SSU ultrasonic stage."""
 
     _LIMIT_GET_COMMANDS = {"x": "XRANGE?", "y": "YRANGE?"}
 
@@ -651,3 +685,10 @@ class _IX3SSUAxis(microscope.abc.StageAxis):
             )
         lmin, lmax = response.split()[-1].split(",")
         return microscope.AxisLimits(lower=int(lmin), upper=int(lmax))
+
+
+class IX83Units(enum.Enum):
+    """List of IX83 units which can be controlled by the TPC interface."""
+
+    IX3LHLEDC = _IX3LHLEDC
+    IX3SSU = _IX3SSU
