@@ -168,6 +168,12 @@ class Clarity(
         __GETSERIAL: 4,
         __FULLSTAT: 10,
     }
+    _filters = (
+        __FLTPOS1,
+        __FLTPOS2,
+        __FLTPOS3,
+        __FLTPOS4,
+    )
 
     def __init__(self, camera=None, camera_kwargs={}, **kwargs) -> None:
         """Create a Clarity instance controlling an optional Camera device.
@@ -193,6 +199,9 @@ class Clarity(
             self._can_process = "ClarityProcessor" in globals()
         # Acquisition mode
         self._mode = Mode.raw
+        # Cached filter and slide positions
+        self._cached_slide = __SLDPOS0
+        self._cached_filter = __FLTPOS1
         # Add device settings
         self.add_setting(
             "sectioning",
@@ -296,18 +305,30 @@ class Clarity(
     def get_slide_position(self):
         """Get the current slide position"""
         result = self._send_command(__GETSLIDE)
-        if result is None:
+        if result is None or result == __SLDERR:
             raise microscope.DeviceError("Slide position error.")
-        return result
+        elif result != __SLDMID:
+            self._cached_slide = result
+        return self._cached_slide
 
     def set_slide_position(self, position, blocking=True):
         """Set the slide position"""
         result = self._send_command(__SETSLIDE, position)
         if result is None:
             raise microscope.DeviceError("Slide position error.")
-        while blocking and self.moving():
-            pass
-        return result
+        self._cached_slide = pos
+        if blocking:
+            # Initial delay
+            time.sleep(0.05)
+            while True:
+                # Wait for 3 consecutive non-mid positions, to avoid spurious
+                # false negatives
+                moving = []
+                for _ in range(3):
+                    moving.append(self._send_command(__GETSLIDE) == __SLDMID)
+                    time.sleep(0.01)
+                if any(moving):
+                    break
 
     def get_slides(self):
         return self._slide_to_sectioning
@@ -375,36 +396,30 @@ class Clarity(
     # def get_filters(self):
     #    pass
 
-    def moving(self):
-        """Report whether or not the device is between positions."""
-        # Wait a short time to avoid false negatives when called
-        # immediately after initiating a move. Trial and error
-        # indicates a delay of 50ms is required.
-        time.sleep(0.05)
-        # Can return false negatives on long moves, so OR 5 readings.
-        moving = False
-        for i in range(5):
-            moving = moving or any(
-                (
-                    self.get_slide_position() == __SLDMID,
-                    self.get_position() == __FLTMID,
-                )
-            )
-            time.sleep(0.01)
-        return moving
-
     def _do_get_position(self):
         """Return the current filter position"""
         result = self._send_command(__GETFILT)
-        if result == __FLTERR:
+        if result is None or result == __FLTERR:
             raise microscope.DeviceError("Filter position error.")
-        return result
+        elif result != __FLTMID:
+            self._cached_filter = self._filters.index(result)
+        return self._cached_filter
 
     def _do_set_position(self, pos, blocking=True):
         """Set the filter position"""
-        result = self._send_command(__SETFILT, pos)
+        result = self._send_command(__SETFILT, self._filters[pos])
         if result is None:
             raise microscope.DeviceError("Filter position error.")
-        while blocking and self.moving():
-            pass
-        return result
+        self._cached_filter = pos
+        if blocking:
+            # Initial delay
+            time.sleep(0.05)
+            while True:
+                # Wait for 3 consecutive non-mid positions, to avoid spurious
+                # false negatives
+                moving = []
+                for _ in range(3):
+                    moving.append(self._send_command(__GETFILT) == __FLTMID)
+                    time.sleep(0.01)
+                if any(moving):
+                    break
