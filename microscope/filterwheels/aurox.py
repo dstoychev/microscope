@@ -123,7 +123,7 @@ class _CameraAugmentor:
         elif self._aurox_mode == Mode.difference:
             if self._processor is None:
                 raise Exception("Not calibrated yet - can not process image")
-            return self._processor.process(data)
+            return self._processor.process(data).get()
         elif self._aurox_mode == Mode.calibrate:
             # This will introduce a significant delay, but returning the
             # image indicates that the calibration step is complete.
